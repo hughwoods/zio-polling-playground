@@ -16,16 +16,16 @@ object MyApp extends ZIOAppDefault {
     Schedule.recurUntil[RunStatus, Completed] { case c: Completed => c } &&
       Schedule.fixed(10.seconds).unit
 
-  val pollingLogic: RIO[Client, Completed] = {
+  val pollingLogic: RIO[Client, Completed] =
     for {
       client <- ZIO.service[Client]
-      run <- client.submit().retry(transientRetryPolicy)
-      check = client.getStatus(run).retry(transientRetryPolicy)
-      result <- check.repeat(pollingSchedule)
+      run    <- client.submit().retry(transientRetryPolicy)
+      result <- client.getStatus(run)
+        .retry(transientRetryPolicy)
+        .repeat(pollingSchedule)
         .timeoutFail(Timeout)(1.minutes)
         .tapError(_ => client.cancel(run).retry(transientRetryPolicy))
     } yield result.get
-  }
 
   override def run = pollingLogic
     .flatMap(c => printLine(c.result))
