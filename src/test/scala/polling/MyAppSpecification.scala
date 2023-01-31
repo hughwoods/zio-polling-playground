@@ -8,7 +8,7 @@ import zio.test._
 
 object MyAppSpecification extends ZIOSpecDefault {
   def spec = suite("Polling logic")(
-    test("Exits after 3 attempts if the client consistently returns transient errors") {
+    test("Exits after 3 attempts if submit consistently returns transient errors") {
       case class TransientClient(counter: Counter) extends TestClient(counter) {
         override def submitAction =
           ZIO.fail(ClientFailure(true, "Service temporarily unavailable"))
@@ -25,7 +25,7 @@ object MyAppSpecification extends ZIOSpecDefault {
       ))
     },
 
-    test("Exits immediately if the client returns a non-transient error") {
+    test("Exits immediately if submit returns a non-transient error") {
       case class NonTransientClient(counter: Counter) extends TestClient(counter) {
         override def submitAction =
           ZIO.fail(ClientFailure(false, "Service deleted"))
@@ -39,6 +39,40 @@ object MyAppSpecification extends ZIOSpecDefault {
 
       assertZIO(result.exit)(pollingFailure(
         ClientFailure(false, "Service deleted") -> CallCount(submit = 1, getStatus = 0, cancel = 0)
+      ))
+    },
+
+    test("Cancels & exits if getStatus returns a transient error") {
+      case class NonTransientClient(counter: Counter) extends TestClient(counter) {
+        override def getStatusAction =
+          ZIO.fail(ClientFailure(true, "Service temporarily unavailable"))
+      }
+      val testClient = ZLayer.fromFunction(NonTransientClient.apply _)
+
+      val result = pollingLogic
+        .raceFirst(TestClock.adjust(200.millis).forever)
+        .flatMapError(exceptionWithCount)
+        .provide(testClient, counter)
+
+      assertZIO(result.exit)(pollingFailure(
+        ClientFailure(true, "Service temporarily unavailable") -> CallCount(submit = 1, getStatus = 3, cancel = 1)
+      ))
+    },
+
+    test("Cancels & exits if getStatus returns a non-transient error") {
+      case class NonTransientClient(counter: Counter) extends TestClient(counter) {
+        override def getStatusAction =
+          ZIO.fail(ClientFailure(false, "Service deleted"))
+      }
+      val testClient = ZLayer.fromFunction(NonTransientClient.apply _)
+
+      val result = pollingLogic
+        .raceFirst(TestClock.adjust(200.millis).forever)
+        .flatMapError(exceptionWithCount)
+        .provide(testClient, counter)
+
+      assertZIO(result.exit)(pollingFailure(
+        ClientFailure(false, "Service deleted") -> CallCount(submit = 1, getStatus = 1, cancel = 1)
       ))
     },
 
