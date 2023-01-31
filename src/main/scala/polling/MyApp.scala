@@ -9,7 +9,7 @@ object MyApp extends ZIOAppDefault {
 
   val transientRetryPolicy =
     Schedule.recurWhile[ClientFailure](_.isTransient) &&
-      Schedule.spaced(100.millis).jittered &&
+      Schedule.spaced(500.millis).jittered &&
       Schedule.recurs(2)
 
   val pollingSchedule =

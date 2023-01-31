@@ -1,6 +1,7 @@
 package polling
 
-import polling.RunStatus.Pending
+import polling.RunStatus.{Completed, Pending}
+import polling.TestClient.{runValue, successValue}
 import polling.TestCounter.Counter
 import zio._
 import zio.test.Assertion
@@ -16,9 +17,13 @@ object TestCounter{
 
 abstract class TestClient(counter: Counter) extends Client {
 
-  def submitAction: IO[ClientFailure, Run] = ZIO.succeed(Run("1234"))
+  def submitAction: IO[ClientFailure, Run] = ZIO.succeed(runValue)
 
-  def getStatusAction: IO[ClientFailure, RunStatus] = ZIO.succeed(Pending)
+  def getStatusPendingAction: IO[ClientFailure, RunStatus] = ZIO.succeed(Pending)
+
+  def getStatusCompletedAction: IO[ClientFailure, RunStatus] = ZIO.succeed(successValue)
+
+  def isCompleted(counter: CallCount): Boolean = counter.getStatus > 4
 
   def cancelAction: IO[ClientFailure, Unit] = ZIO.unit
 
@@ -31,7 +36,8 @@ abstract class TestClient(counter: Counter) extends Client {
   final override def getStatus(run: Run): IO[ClientFailure, RunStatus] =
     for {
       _ <- counter.update(prev => prev.copy(getStatus = prev.getStatus + 1))
-      result <- getStatusAction
+      count <- counter.get
+      result <- if (isCompleted(count)) getStatusCompletedAction else getStatusPendingAction
     } yield result
 
   final override def cancel(run: Run): IO[ClientFailure, Unit] =
@@ -41,12 +47,24 @@ abstract class TestClient(counter: Counter) extends Client {
     } yield result
 }
 
+object TestClient{
+  val runValue = Run("1234")
+
+  val successValue = Completed("congratulations")
+
+  val transientError: ClientFailure = ClientFailure(isTransient = true, message = "Service temporarily unavailable")
+
+  val nontransientError: ClientFailure = ClientFailure(isTransient = false, message = "Service deleted")
+}
+
 object TestClientAssertions{
-  def exceptionWithCount(exception: Throwable) =
+  def resultWithCount[A](result: A) =
     for {
       counter <- ZIO.service[Counter]
       count <- counter.get
-    } yield (exception, count)
+    } yield (result, count)
+
+  def exceptionWithCount(exception: Throwable) = resultWithCount(exception)
 
   def pollingFailure(expected: (Throwable, CallCount)): Assertion[Exit[(Throwable, CallCount), Any]] =
     Assertion.fails(equalTo(expected))
