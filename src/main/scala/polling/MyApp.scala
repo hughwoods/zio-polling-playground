@@ -22,10 +22,10 @@ object MyApp extends ZIOAppDefault {
       run    <- client.submit().retry(transientRetryPolicy)
       result <- client.getStatus(run)
         .retry(transientRetryPolicy)
-        .repeat(pollingSchedule)
+        .repeat(pollingSchedule).map(_.get)
         .timeoutFail(PollingTimeout)(1.minutes)
         .tapError(_ => client.cancel(run).retry(transientRetryPolicy))
-    } yield result.get
+    } yield result
 
   override def run = pollingLogic
     .flatMap(c => printLine(c.result))
