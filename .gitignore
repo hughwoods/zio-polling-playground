@@ -56,3 +56,4 @@ jitwatch.out
 project/**/metals.sbt
 
 .bsp
+src/test/scala/polling/.scala-build/stacktraces/
