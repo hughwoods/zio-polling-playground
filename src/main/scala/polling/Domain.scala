@@ -10,7 +10,7 @@ trait Client {
   def cancel(run: Run): IO[ClientFailure, Unit]
 }
 
-sealed abstract class PollingFailure(message: String)
+sealed abstract class PollingFailure(message: String) extends Product
 final case class ClientFailure(isTransient: Boolean, message: String) extends PollingFailure(message)
 case object PollingTimeout extends PollingFailure(s"The polling operation timed out")
 

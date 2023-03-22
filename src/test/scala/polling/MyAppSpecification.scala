@@ -1,32 +1,37 @@
 package polling
 
 import polling.MyApp._
+import polling.RunStatus.Completed
 import polling.TestClient.{nontransientError, successValue, transientError}
 import polling.TestCounter.{CallLogger, testCallLogger}
 import zio._
 import zio.test._
 
 object MyAppSpecification extends ZIOSpecDefault {
+
+  case class TestOutcome(exit: Exit[PollingFailure, Completed], log: CallLog)
+
+  val runPollingLogicToExit: ZIO[CallLogger with Client, Nothing, TestOutcome] =
+    for {
+      pollingFiber <- pollingLogic.fork
+      _ <- TestClock.adjust(120.seconds)
+      result <- pollingFiber.join.exit
+      counter <- ZIO.service[CallLogger].flatMap(_.get)
+    } yield TestOutcome(result, counter)
+
   def spec = suite("Polling logic")(
     test("Exits after 3 attempts if submit consistently returns transient errors") {
       case class TransientClient(counter: CallLogger) extends TestClient(counter) {
         override def submitAction = ZIO.fail(transientError)
       }
+      val testClient = ZLayer.fromFunction(TransientClient.apply _)
 
-      val testClient = TestClient.layer(TransientClient.apply)
-
-      val assertBehaviour: URIO[TransientClient, TestResult] = for {
-        pollingFiber <- pollingLogic.fork
-        _ <- TestClock.adjust(120.seconds)
-        result <- pollingFiber.join.exit
-        counter <- ZIO.service[TransientClient].map(_.counter)
-        finalCount <- counter.get
+      for {
+        outcome <- runPollingLogicToExit.provide(testClient, testCallLogger)
       } yield assertTrue(
-        result.causeOption.get.failureOption.get == transientError,
-        finalCount.count == CallCount(submit = 3, getStatus = 0, cancel = 0)
+        outcome.exit == Exit.fail(transientError),
+        outcome.log.count == CallCount(submit = 3, getStatus = 0, cancel = 0)
       )
-
-      assertBehaviour.provide(testClient)
     },
 
     test("Exits immediately if submit returns a non-transient error") {
@@ -36,15 +41,12 @@ object MyAppSpecification extends ZIOSpecDefault {
       val testClient = ZLayer.fromFunction(NonTransientClient.apply _)
 
       for {
-        pollingFiber <- pollingLogic.provideLayer(testClient).fork
-        _ <- TestClock.adjust(120.seconds)
-        result <- pollingFiber.join.exit
-        callLog <- ZIO.service[CallLogger].flatMap(_.get)
+        outcome <- runPollingLogicToExit.provide(testClient, testCallLogger)
       } yield assertTrue(
-        result.causeOption.get.failureOption.get == nontransientError,
-        callLog.count == CallCount(submit = 1, getStatus = 0, cancel = 0)
+        outcome.exit == Exit.fail(nontransientError),
+        outcome.log.count == CallCount(submit = 1, getStatus = 0, cancel = 0)
       )
-    }.provide(testCallLogger),
+    },
 
     test("Cancels & exits if getStatus repeatedly returns a transient error") {
       case class TransientClient(callLogger: CallLogger) extends TestClient(callLogger) {
@@ -54,17 +56,14 @@ object MyAppSpecification extends ZIOSpecDefault {
       val testClient = ZLayer.fromFunction(TransientClient.apply _)
 
       for {
-        pollingFiber <- pollingLogic.provideLayer(testClient).fork
-        _ <- TestClock.adjust(120.seconds)
-        result <- pollingFiber.join.exit
-        callLog <- ZIO.service[CallLogger].flatMap(_.get)
+        outcome <- runPollingLogicToExit.provide(testClient, testCallLogger)
       } yield assertTrue(
-        result.causeOption.get.failureOption.get == transientError,
-        callLog.count == CallCount(submit = 1, getStatus = 3, cancel = 1),
-        callLog.span >= Duration.fromMillis(1000), // 500ms retry * 2
-        callLog.span <= Duration.fromMillis(1200) // (500ms retry + 20% jitter) * 2
+        outcome.exit == Exit.fail(transientError),
+        outcome.log.count == CallCount(submit = 1, getStatus = 3, cancel = 1),
+        outcome.log.span >= Duration.fromMillis(1000), // 500ms retry * 2
+        outcome.log.span <= Duration.fromMillis(1200) // (500ms retry + 20% jitter) * 2
       )
-    }.provide(testCallLogger),
+    },
 
     test("Cancels & exits if getStatus returns a non-transient error") {
       case class NonTransientClient(callLogger: CallLogger) extends TestClient(callLogger) {
@@ -73,15 +72,12 @@ object MyAppSpecification extends ZIOSpecDefault {
       val testClient = ZLayer.fromFunction(NonTransientClient.apply _)
 
       for {
-        pollingFiber <- pollingLogic.provideLayer(testClient).fork
-        _ <- TestClock.adjust(120.seconds)
-        result <- pollingFiber.join.exit
-        callLog <- ZIO.service[CallLogger].flatMap(_.get)
+        outcome <- runPollingLogicToExit.provide(testClient, testCallLogger)
       } yield assertTrue(
-        result.causeOption.get.failureOption.get == nontransientError,
-        callLog.count == CallCount(submit = 1, getStatus = 1, cancel = 1)
+        outcome.exit == Exit.fail(nontransientError),
+        outcome.log.count == CallCount(submit = 1, getStatus = 1, cancel = 1)
       )
-    }.provide(testCallLogger),
+    },
 
     test("Times out & cancels after 1 minute if the client always returns pending") {
       case class PendingClient(callLogger: CallLogger) extends TestClient(callLogger) {
@@ -90,16 +86,13 @@ object MyAppSpecification extends ZIOSpecDefault {
       val testClient = ZLayer.fromFunction(PendingClient.apply _)
 
       for {
-        pollingFiber <- pollingLogic.provideLayer(testClient).fork
-        _ <- TestClock.adjust(120.seconds)
-        result <- pollingFiber.join.exit
-        counter <- ZIO.service[CallLogger].flatMap(_.get)
+        outcome <- runPollingLogicToExit.provide(testClient, testCallLogger)
       } yield assertTrue(
-//        result.causeOption.get.failureOption.get.isInstanceOf[PollingTimeout],
-        counter.count == CallCount(submit = 1, getStatus = 7, cancel = 1),
-        counter.span == Duration.fromSeconds(60)
+        outcome.exit == Exit.fail(PollingTimeout),
+        outcome.log.count == CallCount(submit = 1, getStatus = 7, cancel = 1),
+        outcome.log.span == Duration.fromSeconds(60)
       )
-    }.provide(testCallLogger),
+    },
 
     test("Returns value if all interactions with the client are successful") {
       case class CompletedClient(callLogger: CallLogger) extends TestClient(callLogger) {
@@ -108,14 +101,11 @@ object MyAppSpecification extends ZIOSpecDefault {
       val testClient = ZLayer.fromFunction(CompletedClient.apply _)
 
       for {
-        pollingFiber <- pollingLogic.provideLayer(testClient).fork
-        _ <- TestClock.adjust(120.seconds)
-        result <- pollingFiber.join
-        counter <- ZIO.service[CallLogger].flatMap(_.get)
+        outcome <- runPollingLogicToExit.provide(testClient, testCallLogger)
       } yield assertTrue(
-        result == successValue,
-        counter.count == CallCount(1, 1, 0)
+        outcome.exit == Exit.succeed(successValue),
+        outcome.log.count == CallCount(1, 1, 0)
       )
-    }.provide(testCallLogger)
+    }
   )
 }

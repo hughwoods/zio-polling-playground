@@ -60,10 +60,6 @@ abstract class TestClient(counter: CallLogger) extends Client {
 }
 
 object TestClient{
-  def layer[Client <: TestClient: Tag](ctor: CallLogger => Client) = ZLayer.fromZIO(
-    Ref.make(CallLog(Nil, Nil, Nil)).map(ctor)
-  )
-
   val runValue = Run("1234")
 
   val successValue = Completed("congratulations")
